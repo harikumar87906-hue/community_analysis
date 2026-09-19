@@ -1,20 +1,35 @@
 import random
 import networkx as nx
+from bson import ObjectId
 from utils.mongo_client import get_collection
 
 
-def build_graph(posts=None, comments=None):
+def build_graph(posts=None, comments=None, post_ids=None):
     """
     Builds both:
     1. Complete multi-entity graph representation (Users, Posts, Comments, Subreddits, and relationships).
-    2. User interaction graph (NetworkX Graph) for centrality and community detection.
+    2. User interaction graph (NetworkX DiGraph) for centrality and propagation analysis.
     """
     if posts is None:
         posts_col = get_collection("posts")
-        # posts = list(posts_col.find())
 
-        # Only fetch posts that have at least 1 comment
-        posts = list(posts_col.find({"num_comments": {"$gt": 0}}))
+        if post_ids is not None:
+            # Try _id lookup first (STIA returns str(_id)), fall back to post_id
+            object_ids = []
+            for pid in post_ids:
+                try:
+                    object_ids.append(ObjectId(pid))
+                except Exception:
+                    pass
+
+            posts = list(posts_col.find({"_id": {"$in": object_ids}})) if object_ids else []
+
+            # Fallback: if _id lookup returned nothing, try post_id field
+            if not posts:
+                posts = list(posts_col.find({"post_id": {"$in": post_ids}}))
+        else:
+            # Only fetch posts that have at least 1 comment
+            posts = list(posts_col.find({"num_comments": {"$gt": 0}}))
 
     if len(posts) > 1000:
         random.seed(42)
@@ -26,7 +41,7 @@ def build_graph(posts=None, comments=None):
         comments_col = get_collection("comments")
         comments = list(comments_col.find({"post_id": {"$in": sampled_post_ids}}))
 
-        
+
 
     # Helper to clean invalid authors
     def is_valid_author(author):
@@ -137,8 +152,8 @@ def build_graph(posts=None, comments=None):
                 pair = (c_author, target_user)
                 user_replies_count[pair] = user_replies_count.get(pair, 0) + 1
 
-    # 4. Build User Interaction NetworkX Graph
-    G_user = nx.Graph()
+    # 4. Build User Interaction NetworkX DiGraph (directed for propagation analysis)
+    G_user = nx.DiGraph()
     for u in users:
         G_user.add_node(u, type="user")
 

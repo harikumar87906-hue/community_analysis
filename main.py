@@ -1,6 +1,6 @@
 from agents.data_agent import DataAgent
 from agents.community_agent import CommunityAgent
-from agents.stia_agent import stia_node
+from agents.stia_agent import fetch_random_posts, analyze_post, print_results
 if __name__ == "__main__":
     # agent = DataAgent(
     #     subreddits=None,           # all subreddits
@@ -14,5 +14,20 @@ if __name__ == "__main__":
     # result = agent.run()
 
     
-    community_agent = CommunityAgent()
-    community_result = community_agent.run()
+    # community_agent = CommunityAgent()
+    # community_result = community_agent.run()
+    # Step 1 — fetch 100 posts
+
+    posts = fetch_random_posts(n=250000)
+    post_ids = [p["id"] for p in posts]
+
+    # Step 2 — run STIA
+    results = []
+    for post in posts:
+        result = analyze_post(post)
+        results.append(result)
+    print_results(results)
+
+    # Step 3 — run Community agent with same post IDs
+    # agent = CommunityAgent()
+    # agent.run(post_ids=post_ids)

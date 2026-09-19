@@ -1,5 +1,5 @@
-import community as community_louvain
 import networkx as nx
+from collections import defaultdict
 
 
 def _compute_pagerank(G, alpha=0.85, max_iter=100, tol=1.0e-6, weight="weight"):
@@ -50,86 +50,170 @@ def _compute_pagerank(G, alpha=0.85, max_iter=100, tol=1.0e-6, weight="weight"):
     return {n: float(v / s) for n, v in x.items()}
 
 
-def detect_communities(G):
-    """
-    Runs Louvain community detection on the user interaction graph.
-    """
-    if G.number_of_nodes() == 0:
-        print("  Community detection skipped: graph has no nodes.")
-        return {}, 0.0
-
-    # Louvain requires an undirected graph
-    G_undirected = G.to_undirected() if G.is_directed() else G
-
-    if G_undirected.number_of_edges() == 0:
-        # If no edges, assign each user to an individual community
-        partition = {node: idx for idx, node in enumerate(G.nodes())}
-        modularity = 0.0
-    else:
-        try:
-            partition = community_louvain.best_partition(G_undirected, weight="weight")
-            modularity = community_louvain.modularity(partition, G_undirected, weight="weight")
-        except Exception as e:
-            print(f"  Warning in Louvain detection: {e}, falling back to component-based partition")
-            components = list(nx.connected_components(G_undirected))
-            partition = {}
-            for idx, comp in enumerate(components):
-                for node in comp:
-                    partition[node] = idx
-            try:
-                modularity = community_louvain.modularity(partition, G_undirected, weight="weight")
-            except Exception:
-                modularity = 0.0
-
-    num_communities = len(set(partition.values()))
-    print(f"  Communities detected: {num_communities}")
-    print(f"  Modularity score   : {round(modularity, 4)}")
-    return partition, modularity
-
-
 def get_centrality(G):
     """
-    Calculates Degree and PageRank centralities.
+    Calculates Degree, PageRank, and Betweenness centralities.
     """
     if G.number_of_nodes() == 0:
-        return {"degree": {}, "pagerank": {}}
+        return {"degree": {}, "pagerank": {}, "betweenness": {}}
 
     degree   = nx.degree_centrality(G)
     pagerank = _compute_pagerank(G, weight="weight")
+    betweenness = nx.betweenness_centrality(G, weight="weight")
 
     return {
-        "degree":   degree,
-        "pagerank": pagerank
+        "degree":      degree,
+        "pagerank":    pagerank,
+        "betweenness": betweenness
     }
 
 
-def get_influential_users(partition, centrality_dict, top_n=5):
+def compute_propagation_metrics(G):
     """
-    Ranks users within each community using centrality metrics.
+    Computes propagation metrics for each user in the directed graph.
+    Returns a dict keyed by username with:
+        pagerank, betweenness_centrality, in_degree, out_degree, propagation_score
+    Composite: 0.4*pagerank + 0.4*betweenness + 0.2*out_degree_normalized
     """
-    pagerank = centrality_dict.get("pagerank", {})
-    degree = centrality_dict.get("degree", {})
+    if G.number_of_nodes() == 0:
+        return {}
 
-    community_ids = set(partition.values())
-    influential = {}
+    pagerank = _compute_pagerank(G, weight="weight")
+    betweenness = nx.betweenness_centrality(G, weight="weight")
 
-    for comm_id in community_ids:
-        members = [user for user, c in partition.items() if c == comm_id]
+    # Compute raw in/out degrees
+    in_degrees = dict(G.in_degree())
+    out_degrees = dict(G.out_degree())
 
-        ranked = sorted(
-            members,
-            key=lambda u: (pagerank.get(u, 0), degree.get(u, 0)),
-            reverse=True
-        )
+    # Normalize out_degree for composite score
+    max_out = max(out_degrees.values()) if out_degrees else 1
+    max_out = max(max_out, 1)  # avoid division by zero
 
-        top_members = []
-        for u in ranked[:top_n]:
-            top_members.append({
-                "username": u,
-                "pagerank": round(pagerank.get(u, 0), 5),
-                "degree": round(degree.get(u, 0), 5)
-            })
+    metrics = {}
+    for node in G.nodes():
+        pr = pagerank.get(node, 0.0)
+        bc = betweenness.get(node, 0.0)
+        in_deg = in_degrees.get(node, 0)
+        out_deg = out_degrees.get(node, 0)
+        out_deg_norm = out_deg / max_out
 
-        influential[comm_id] = top_members
+        propagation_score = 0.4 * pr + 0.4 * bc + 0.2 * out_deg_norm
 
-    return influential
+        metrics[node] = {
+            "pagerank": round(pr, 6),
+            "betweenness_centrality": round(bc, 6),
+            "in_degree": in_deg,
+            "out_degree": out_deg,
+            "propagation_score": round(propagation_score, 6)
+        }
+
+    return metrics
+
+
+def assign_propagation_roles(G, metrics):
+    """
+    Labels each user with a propagation role based on their metrics:
+        Origin    — high out_degree, low in_degree
+        Amplifier — high out_degree AND high pagerank
+        Bridge    — high betweenness
+        Echo      — high in_degree, low out_degree
+        Endpoint  — low everything
+    Returns a dict {username: role}
+    """
+    if not metrics:
+        return {}
+
+    # Compute thresholds from metric distributions
+    all_pr = [m["pagerank"] for m in metrics.values()]
+    all_bc = [m["betweenness_centrality"] for m in metrics.values()]
+    all_in = [m["in_degree"] for m in metrics.values()]
+    all_out = [m["out_degree"] for m in metrics.values()]
+
+    def percentile(values, pct):
+        if not values:
+            return 0
+        s = sorted(values)
+        idx = int(len(s) * pct / 100)
+        idx = min(idx, len(s) - 1)
+        return s[idx]
+
+    pr_high = percentile(all_pr, 75)
+    bc_high = percentile(all_bc, 75)
+    in_high = percentile(all_in, 75)
+    out_high = percentile(all_out, 75)
+    in_low = percentile(all_in, 25)
+    out_low = percentile(all_out, 25)
+
+    roles = {}
+    for node, m in metrics.items():
+        pr = m["pagerank"]
+        bc = m["betweenness_centrality"]
+        in_deg = m["in_degree"]
+        out_deg = m["out_degree"]
+
+        if out_deg >= out_high and pr >= pr_high:
+            roles[node] = "Amplifier"
+        elif bc >= bc_high:
+            roles[node] = "Bridge"
+        elif out_deg >= out_high and in_deg <= in_low:
+            roles[node] = "Origin"
+        elif in_deg >= in_high and out_deg <= out_low:
+            roles[node] = "Echo"
+        else:
+            roles[node] = "Endpoint"
+
+    return roles
+
+
+def compute_cascade_depth(G):
+    """
+    For each weakly connected component in the directed graph,
+    find the longest path using nx.dag_longest_path_length().
+    Returns dict of {component_root: depth}.
+    Cycles are handled by falling back to diameter of the undirected version.
+    """
+    if G.number_of_nodes() == 0:
+        return {}
+
+    cascade_depths = {}
+    for component_nodes in nx.weakly_connected_components(G):
+        subgraph = G.subgraph(component_nodes)
+
+        # Determine root (node with highest out_degree in component)
+        root = max(component_nodes, key=lambda n: G.out_degree(n))
+
+        try:
+            depth = nx.dag_longest_path_length(subgraph)
+        except nx.NetworkXUnfeasible:
+            # Graph has cycles — fallback to undirected diameter approximation
+            ug = subgraph.to_undirected()
+            if ug.number_of_edges() > 0:
+                try:
+                    depth = nx.diameter(ug)
+                except nx.NetworkXError:
+                    depth = 0
+            else:
+                depth = 0
+
+        cascade_depths[root] = depth
+
+    return cascade_depths
+
+
+def compute_temporal_velocity(posts):
+    """
+    Groups posts by hour using created_utc (timestamp) field.
+    Returns a dict of {hour_bucket: count} representing posts per hour.
+    """
+    if not posts:
+        return {}
+
+    posts_per_hour = defaultdict(int)
+    for p in posts:
+        ts = p.get("timestamp", 0) or p.get("created_utc", 0) or p.get("created", 0)
+        ts = int(ts)
+        if ts > 0:
+            hour_bucket = ts - (ts % 3600)  # Round down to nearest hour
+            posts_per_hour[hour_bucket] += 1
+
+    return dict(posts_per_hour)

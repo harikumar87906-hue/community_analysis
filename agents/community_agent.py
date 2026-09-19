@@ -1,10 +1,18 @@
+from datetime import datetime, timezone
+
 from graph.graph_builder import build_graph
-from graph.community_detector import detect_communities, get_centrality, get_influential_users
+from graph.community_detector import (
+    get_centrality,
+    compute_propagation_metrics,
+    assign_propagation_roles,
+    compute_cascade_depth,
+    compute_temporal_velocity,
+)
 from utils.mongo_client import get_collection
 from utils.neo4j_client import get_driver
 
 
-def store_to_neo4j(graph_data, partition, centrality_dict):
+def store_to_neo4j(graph_data, metrics, roles):
     driver = get_driver()
     with driver.session() as session:
         # Clear existing data
@@ -20,17 +28,18 @@ def store_to_neo4j(graph_data, partition, centrality_dict):
                 subreddits=graph_data["subreddits"]
             )
 
-        # 2. Create User nodes with community and centrality attributes
+        # 2. Create User nodes with propagation attributes
         users_payload = []
-        deg = centrality_dict.get("degree", {})
-        pr = centrality_dict.get("pagerank", {})
-
         for u in graph_data["users"]:
+            m = metrics.get(u, {})
             users_payload.append({
                 "name": str(u),
-                "community": int(partition.get(u, -1)),
-                "degree_centrality": float(deg.get(u, 0.0)),
-                "pagerank": float(pr.get(u, 0.0))
+                "role": roles.get(u, "Endpoint"),
+                "propagation_score": float(m.get("propagation_score", 0.0)),
+                "pagerank": float(m.get("pagerank", 0.0)),
+                "betweenness": float(m.get("betweenness_centrality", 0.0)),
+                "in_degree": int(m.get("in_degree", 0)),
+                "out_degree": int(m.get("out_degree", 0)),
             })
 
         if users_payload:
@@ -38,9 +47,12 @@ def store_to_neo4j(graph_data, partition, centrality_dict):
                 """
                 UNWIND $users AS u
                 MERGE (user:User {name: u.name})
-                SET user.community = u.community,
-                    user.degree_centrality = u.degree_centrality,
-                    user.pagerank = u.pagerank
+                SET user.role = u.role,
+                    user.propagation_score = u.propagation_score,
+                    user.pagerank = u.pagerank,
+                    user.betweenness = u.betweenness,
+                    user.in_degree = u.in_degree,
+                    user.out_degree = u.out_degree
                 """,
                 users=users_payload
             )
@@ -147,55 +159,128 @@ def store_to_neo4j(graph_data, partition, centrality_dict):
     print(f"  Complete heterogeneous graph stored in Neo4j.")
 
 
-def store_communities_to_mongo(partition, modularity, influential):
-    collection = get_collection("communities")
+def store_propagation_to_mongo(metrics, roles):
+    """
+    Stores propagation analysis results into the 'propagation' MongoDB collection.
+    """
+    collection = get_collection("propagation")
     collection.drop()
 
-    communities = []
-    for comm_id in set(partition.values()):
-        members = [user for user, c in partition.items() if c == comm_id]
-        communities.append({
-            "community_id":      int(comm_id),
-            "members":           members,
-            "size":              len(members),
-            "influential_users": influential.get(comm_id, []),
-            "modularity":        round(float(modularity), 4)
+    documents = []
+    analyzed_at = datetime.now(timezone.utc)
+
+    for username, m in metrics.items():
+        documents.append({
+            "username": username,
+            "role": roles.get(username, "Endpoint"),
+            "pagerank": round(float(m.get("pagerank", 0.0)), 6),
+            "betweenness": round(float(m.get("betweenness_centrality", 0.0)), 6),
+            "in_degree": int(m.get("in_degree", 0)),
+            "out_degree": int(m.get("out_degree", 0)),
+            "propagation_score": round(float(m.get("propagation_score", 0.0)), 6),
+            "analyzed_at": analyzed_at,
         })
 
-    if communities:
-        collection.insert_many(communities)
-        print(f"  {len(communities)} communities stored in MongoDB")
+    if documents:
+        collection.insert_many(documents)
+        print(f"  {len(documents)} propagation records stored in MongoDB")
+
+
+def print_results(metrics, roles, cascade_depths, temporal_velocity):
+    """
+    Prints a clean CLI table of propagation results and summary.
+    """
+    # Sort users by propagation_score descending
+    sorted_users = sorted(
+        metrics.items(),
+        key=lambda x: x[1].get("propagation_score", 0),
+        reverse=True
+    )
+
+    # Print table header
+    print("\n" + "=" * 90)
+    print(f"{'Username':<25} {'Role':<12} {'Prop.Score':>10} {'In-Deg':>8} {'Out-Deg':>8} {'PageRank':>10}")
+    print("-" * 90)
+
+    for username, m in sorted_users[:30]:  # Top 30 users
+        role = roles.get(username, "Endpoint")
+        print(
+            f"{username:<25} {role:<12} "
+            f"{m.get('propagation_score', 0):>10.6f} "
+            f"{m.get('in_degree', 0):>8} "
+            f"{m.get('out_degree', 0):>8} "
+            f"{m.get('pagerank', 0):>10.6f}"
+        )
+
+    print("=" * 90)
+
+    # Role counts summary
+    from collections import Counter
+    role_counts = Counter(roles.values())
+    print(f"\n--- Role Distribution ---")
+    for role_name in ["Origin", "Amplifier", "Bridge", "Echo", "Endpoint"]:
+        count = role_counts.get(role_name, 0)
+        print(f"  {role_name:<12}: {count}")
+    print(f"  {'Total':<12}: {len(roles)}")
+
+    # Cascade depth summary
+    if cascade_depths:
+        max_depth = max(cascade_depths.values()) if cascade_depths else 0
+        avg_depth = sum(cascade_depths.values()) / len(cascade_depths) if cascade_depths else 0
+        print(f"\n--- Cascade Depth ---")
+        print(f"  Components  : {len(cascade_depths)}")
+        print(f"  Max depth   : {max_depth}")
+        print(f"  Avg depth   : {avg_depth:.2f}")
+
+    # Temporal velocity summary
+    if temporal_velocity:
+        total_posts = sum(temporal_velocity.values())
+        active_hours = len(temporal_velocity)
+        peak_hour = max(temporal_velocity, key=temporal_velocity.get)
+        peak_count = temporal_velocity[peak_hour]
+        print(f"\n--- Temporal Velocity ---")
+        print(f"  Total posts : {total_posts}")
+        print(f"  Active hours: {active_hours}")
+        print(f"  Peak hour   : {peak_hour} ({peak_count} posts)")
 
 
 class CommunityAgent:
-    def run(self):
+    def run(self, post_ids=None, posts=None):
 
         print("\nBuilding multi-entity and interaction graphs.")
-        graph_data, G_user = build_graph()
+        graph_data, G_user = build_graph(posts=posts, post_ids=post_ids)
 
         if len(graph_data["users"]) == 0 and len(graph_data["posts"]) == 0:
             print("  Graph is empty — no data found in MongoDB.")
             return {}
 
-        print("\nDetecting communities on user interactions.")
-        partition, modularity = detect_communities(G_user)
+        print("\nComputing propagation metrics.")
+        metrics = compute_propagation_metrics(G_user)
 
-        print("\nComputing network centrality metrics (Degree, PageRank).")
+        print("\nAssigning propagation roles.")
+        roles = assign_propagation_roles(G_user, metrics)
+
+        print("\nComputing network centrality metrics (Degree, PageRank, Betweenness).")
         centrality_dict = get_centrality(G_user)
 
-        print("\nIdentifying influential users across communities.")
-        influential = get_influential_users(partition, centrality_dict)
+        print("\nComputing cascade depths.")
+        cascade_depths = compute_cascade_depth(G_user)
+
+        print("\nComputing temporal velocity.")
+        temporal_velocity = compute_temporal_velocity(graph_data["posts"])
 
         print("\nStoring complete graph into Neo4j.")
-        store_to_neo4j(graph_data, partition, centrality_dict)
+        store_to_neo4j(graph_data, metrics, roles)
 
-        print("\nStoring community analysis into MongoDB.")
-        store_communities_to_mongo(partition, modularity, influential)
+        print("\nStoring propagation analysis into MongoDB.")
+        store_propagation_to_mongo(metrics, roles)
+
+        print_results(metrics, roles, cascade_depths, temporal_velocity)
 
         return {
-            "num_communities": len(set(partition.values())),
-            "modularity":      modularity,
-            "partition":       partition,
-            "influential":     influential,
-            "centrality":      centrality_dict
+            "metrics": metrics,
+            "roles": roles,
+            "centrality": centrality_dict,
+            "cascade_depths": cascade_depths,
+            "temporal_velocity": temporal_velocity,
         }
