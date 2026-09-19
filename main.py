@@ -1,7 +1,6 @@
 from agents.data_agent import DataAgent
 from agents.community_agent import CommunityAgent
-from agents.misinfo_agent import MisinfoAgent
-
+from agents.stia_agent import stia_node
 if __name__ == "__main__":
     # agent = DataAgent(
     #     subreddits=None,           # all subreddits
@@ -14,10 +13,6 @@ if __name__ == "__main__":
     # )
     # result = agent.run()
 
-    # Phase 2 - Community Agent
+    
     community_agent = CommunityAgent()
     community_result = community_agent.run()
-
-    # Phase 3 - Misinformation Detection Agent
-    # misinfo_agent = MisinfoAgent(batch_size=4)
-    # misinfo_result = misinfo_agent.run()

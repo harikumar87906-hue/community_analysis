@@ -169,31 +169,29 @@ def store_communities_to_mongo(partition, modularity, influential):
 
 class CommunityAgent:
     def run(self):
-        print("\nCommunity Agent started...")
 
-        print("\nBuilding multi-entity and interaction graphs...")
+        print("\nBuilding multi-entity and interaction graphs.")
         graph_data, G_user = build_graph()
 
         if len(graph_data["users"]) == 0 and len(graph_data["posts"]) == 0:
             print("  Graph is empty — no data found in MongoDB.")
             return {}
 
-        print("\nDetecting communities on user interactions...")
+        print("\nDetecting communities on user interactions.")
         partition, modularity = detect_communities(G_user)
 
-        print("\nComputing network centrality metrics (Degree, PageRank)...")
+        print("\nComputing network centrality metrics (Degree, PageRank).")
         centrality_dict = get_centrality(G_user)
 
-        print("\nIdentifying influential users across communities...")
+        print("\nIdentifying influential users across communities.")
         influential = get_influential_users(partition, centrality_dict)
 
-        print("\nStoring complete graph into Neo4j...")
+        print("\nStoring complete graph into Neo4j.")
         store_to_neo4j(graph_data, partition, centrality_dict)
 
-        print("\nStoring community analysis into MongoDB...")
+        print("\nStoring community analysis into MongoDB.")
         store_communities_to_mongo(partition, modularity, influential)
 
-        print("\nCommunity Agent complete.")
         return {
             "num_communities": len(set(partition.values())),
             "modularity":      modularity,
