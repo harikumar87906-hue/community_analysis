@@ -1,6 +1,6 @@
 from agents.data_agent import DataAgent
 from agents.community_agent import CommunityAgent
-from agents.stia_agent import fetch_random_posts, analyze_post, print_results
+from agents.stia_agent import fetch_posts, analyze_post, print_results
 if __name__ == "__main__":
     # agent = DataAgent(
     #     subreddits=None,           # all subreddits
@@ -18,7 +18,9 @@ if __name__ == "__main__":
     # community_result = community_agent.run()
     # Step 1 — fetch 100 posts
 
-    posts = fetch_random_posts(n=250000)
+    SUBREDDIT = "buildapc"  # ← change to your target subreddit
+
+    posts = fetch_posts(subreddit=SUBREDDIT)
     post_ids = [p["id"] for p in posts]
 
     # Step 2 — run STIA
@@ -29,5 +31,5 @@ if __name__ == "__main__":
     print_results(results)
 
     # Step 3 — run Community agent with same post IDs
-    # agent = CommunityAgent()
-    # agent.run(post_ids=post_ids)
+    agent = CommunityAgent()
+    agent.run(post_ids=post_ids)
